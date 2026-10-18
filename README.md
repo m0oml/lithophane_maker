@@ -20,15 +20,18 @@ pip install -e .
 lithophane
 ```
 
-## Windows exe
+## Ready-made apps
 
-Download `LithophaneMaker-windows.zip` from the [Releases](../../releases) page, extract
-it, and run `LithophaneMaker.exe` inside the `LithophaneMaker` folder; no Python needed.
-Keep the exe with the rest of the folder.
+No Python needed. From the [Releases](../../releases) page download:
 
-GitHub Actions builds it (`.github/workflows/build-windows.yml`): push a tag such as
-`v0.1.0` to make a release, or run the workflow by hand from the Actions tab. To build
-it yourself on Windows:
+- **Windows:** `LithophaneMaker-windows.zip`. Extract it and run `LithophaneMaker.exe` in the
+  `LithophaneMaker` folder (keep the exe with the rest of the folder). Windows may warn
+  that the app is unrecognised the first time: choose More info, then Run anyway.
+- **Linux:** `LithophaneMaker-linux.tar.gz`. Extract it and run `LithophaneMaker/LithophaneMaker`.
+
+GitHub Actions builds both (`.github/workflows/build.yml`): push a tag such as `v0.1.0`
+to make a release, or run the workflow by hand from the Actions tab. To build one
+yourself, on the system you want it for:
 
 ```sh
 pip install . pyinstaller

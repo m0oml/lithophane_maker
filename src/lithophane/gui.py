@@ -8,20 +8,22 @@ from PySide6.QtGui import QColor, QPixmap, QVector3D
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
-    QComboBox,
     QDoubleSpinBox,
     QFileDialog,
-    QFormLayout,
-    QGroupBox,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QScrollArea,
+    QStackedWidget,
     QStatusBar,
     QVBoxLayout,
     QWidget,
 )
+
+from lithophane import theme
 
 from lithophane.mesh import (
     arc_radius_mm,
@@ -35,6 +37,7 @@ from lithophane.mesh import (
     panel_dimensions_from_height,
     standing_lithophane,
 )
+from lithophane.widgets import Section, SegmentedControl
 
 
 # pyqtgraph's own "shaded" program lights faces pointing away from the camera, which leaves
@@ -114,7 +117,7 @@ class ModelPreviewWidget(gl.GLViewWidget):
     def __init__(self):
         super().__init__()
         self.setMinimumSize(420, 420)
-        self.setBackgroundColor(QColor("#30343a"))
+        self.setBackgroundColor(QColor(theme.VIEWPORT))
         self.mesh_item = None
         self.stand_item = None
         self.backlit = False
@@ -122,7 +125,7 @@ class ModelPreviewWidget(gl.GLViewWidget):
 
     def set_backlit(self, backlit: bool):
         self.backlit = backlit
-        self.setBackgroundColor(QColor("#0c0d0f" if backlit else "#30343a"))
+        self.setBackgroundColor(QColor(theme.VIEWPORT_BACKLIT if backlit else theme.VIEWPORT))
         if self._mesh is not None:
             self._show(*self._mesh)
 
@@ -136,15 +139,23 @@ class ModelPreviewWidget(gl.GLViewWidget):
         self._show(*self._mesh)
 
         everything = vertices if stand is None else np.concatenate([vertices, stand[0]])
-        lo, hi = everything.min(axis=0), everything.max(axis=0)
-        self.opts["center"] = QVector3D(*((lo + hi) / 2))
+        self._bounds = (everything.min(axis=0), everything.max(axis=0))
+        self._picture_faces_y = picture_faces_y
+        self.opts["center"] = QVector3D(*((self._bounds[0] + self._bounds[1]) / 2))
         if reset_view:
-            # Face the picture: arcs face +y with z up; flat pieces face +z with y up.
-            if picture_faces_y:
-                self.setCameraPosition(elevation=15, azimuth=90)
-            else:
-                self.setCameraPosition(elevation=70, azimuth=-90)
-            self.setCameraPosition(distance=1.6 * float(np.max(hi - lo)))
+            self.reset_camera()
+
+    def reset_camera(self):
+        if self._mesh is None:
+            return
+        lo, hi = self._bounds
+        self.opts["center"] = QVector3D(*((lo + hi) / 2))
+        # Face the picture: arcs face +y with z up; flat pieces face +z with y up.
+        if self._picture_faces_y:
+            self.setCameraPosition(elevation=15, azimuth=90)
+        else:
+            self.setCameraPosition(elevation=70, azimuth=-90)
+        self.setCameraPosition(distance=1.5 * float(np.max(hi - lo)))
 
     def _show(self, vertices, faces, thickness, thickness_range, stand):
         self._remove_items()
@@ -183,208 +194,268 @@ class ModelPreviewWidget(gl.GLViewWidget):
         self._remove_items()
 
 
+def _spin(low, high, value, suffix, step=None, decimals=2, tip=None):
+    spin = QDoubleSpinBox()
+    spin.setRange(low, high)
+    spin.setDecimals(decimals)
+    spin.setValue(value)
+    spin.setSuffix(suffix)
+    if step is not None:
+        spin.setSingleStep(step)
+    if tip:
+        spin.setToolTip(tip)
+    return spin
+
+
+class ThumbnailLabel(QLabel):
+    """Photo preview that also opens the file picker when clicked."""
+
+    def __init__(self, on_click):
+        super().__init__("Click or drop a photo here")
+        self.setObjectName("thumb")
+        self.setAlignment(Qt.AlignCenter)
+        self.setFixedHeight(190)
+        self.setCursor(Qt.PointingHandCursor)
+        self.on_click = on_click
+
+    def mousePressEvent(self, event):
+        self.on_click()
+
+
+LABEL_WIDTH = 112  # same label column in every card, so the boxes line up
+SHAPES = [("Flat", "Flat panel"), ("Arc", "Curved arc"), ("Circle", "Circle")]
+IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"}
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Lithophane Maker")
+        self.setAcceptDrops(True)
         self.image_path: str | None = None
         self.image_size: tuple[int, int] | None = None
 
         central = QWidget()
+        central.setObjectName("central")
         self.setCentralWidget(central)
         layout = QHBoxLayout(central)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(self._build_sidebar())
+        layout.addWidget(self._build_viewport(), stretch=1)
 
-        preview_layout = QVBoxLayout()
-        self.preview_label = QLabel("No image loaded")
-        self.preview_label.setAlignment(Qt.AlignCenter)
-        self.preview_label.setFixedSize(240, 240)
-        self.preview_label.setStyleSheet("border: 1px solid gray;")
-        open_button = QPushButton("Open Image…")
-        open_button.clicked.connect(self.open_image)
-        preview_layout.addWidget(self.preview_label)
-        preview_layout.addWidget(open_button)
-        preview_layout.addStretch()
-        layout.addLayout(preview_layout)
+        self.setStatusBar(QStatusBar())
+        self._connect_updates()
+        self._on_shape_changed(self._shape())
 
-        model_layout = QVBoxLayout()
-        self.model_preview = ModelPreviewWidget()
-        model_layout.addWidget(self.model_preview, stretch=1)
-        model_footer = QHBoxLayout()
-        self.backlit_checkbox = QCheckBox("Backlit")
-        self.backlit_checkbox.setToolTip("Show roughly how it will look with a light behind it.")
-        self.backlit_checkbox.toggled.connect(self.model_preview.set_backlit)
-        model_footer.addWidget(self.backlit_checkbox)
-        model_footer.addStretch()
-        model_footer.addWidget(QLabel("Drag to rotate, scroll to zoom. Shown at reduced detail."))
-        model_layout.addLayout(model_footer)
-        layout.addLayout(model_layout, stretch=1)
+    # ----- layout -----
 
-        form_layout = QVBoxLayout()
-        form = QFormLayout()
+    def _build_sidebar(self):
+        sidebar = QFrame()
+        sidebar.setObjectName("sidebar")
+        sidebar.setFixedWidth(360)
+        column = QVBoxLayout(sidebar)
+        column.setContentsMargins(0, 0, 0, 0)
+        column.setSpacing(0)
 
-        self.shape_combo = QComboBox()
-        self.shape_combo.addItems(["Flat panel", "Curved arc", "Circle"])
-        self.shape_combo.currentTextChanged.connect(self._on_shape_changed)
-        form.addRow("Shape", self.shape_combo)
+        brand = QHBoxLayout()
+        brand.setContentsMargins(18, 16, 18, 10)
+        brand.setSpacing(10)
+        logo = QLabel()
+        logo.setPixmap(theme.app_icon().pixmap(30, 30))
+        brand.addWidget(logo)
+        titles = QVBoxLayout()
+        titles.setSpacing(0)
+        title = QLabel("Lithophane Maker")
+        title.setObjectName("appTitle")
+        subtitle = QLabel("Photo to printable lithophane")
+        subtitle.setObjectName("appSubtitle")
+        titles.addWidget(title)
+        titles.addWidget(subtitle)
+        brand.addLayout(titles)
+        brand.addStretch()
+        column.addLayout(brand)
 
-        self.size_mm = QDoubleSpinBox()
-        self.size_mm.setRange(10.0, 1000.0)
-        self.size_mm.setValue(80.0)
-        self.size_mm.setSuffix(" mm")
-        self.size_row_label = QLabel("Width")
-        form.addRow(self.size_row_label, self.size_mm)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        content = QWidget()
+        content.setObjectName("sidebarContent")
+        cards = QVBoxLayout(content)
+        cards.setContentsMargins(14, 4, 10, 14)
+        cards.setSpacing(10)
+        for section in (
+            self._photo_section(), self._shape_section(), self._thickness_section(),
+            self._frame_section(), self._hook_section(), self._stand_section(),
+        ):
+            section.align_labels(LABEL_WIDTH)
+            cards.addWidget(section)
+        cards.addStretch()
+        scroll.setWidget(content)
+        column.addWidget(scroll, stretch=1)
 
-        self.arc_angle_deg = QDoubleSpinBox()
-        self.arc_angle_deg.setRange(1.0, 350.0)
-        self.arc_angle_deg.setValue(60.0)
-        self.arc_angle_deg.setSuffix(" °")
-        self.arc_angle_row_label = QLabel("Angle")
-        form.addRow(self.arc_angle_row_label, self.arc_angle_deg)
-
-        self.min_thickness_mm = QDoubleSpinBox()
-        self.min_thickness_mm.setRange(0.1, 10.0)
-        self.min_thickness_mm.setSingleStep(0.1)
-        self.min_thickness_mm.setValue(0.6)
-        self.min_thickness_mm.setSuffix(" mm")
-        form.addRow("Min thickness", self.min_thickness_mm)
-
-        self.max_thickness_mm = QDoubleSpinBox()
-        self.max_thickness_mm.setRange(0.2, 20.0)
-        self.max_thickness_mm.setSingleStep(0.1)
-        self.max_thickness_mm.setValue(3.0)
-        self.max_thickness_mm.setSuffix(" mm")
-        form.addRow("Max thickness", self.max_thickness_mm)
-
-        self.mm_per_pixel = QDoubleSpinBox()
-        self.mm_per_pixel.setRange(0.05, 2.0)
-        self.mm_per_pixel.setDecimals(2)
-        self.mm_per_pixel.setSingleStep(0.05)
-        self.mm_per_pixel.setValue(0.1)
-        self.mm_per_pixel.setSuffix(" mm")
-        form.addRow("mm per pixel", self.mm_per_pixel)
-
-        self.invert_checkbox = QCheckBox("Invert (dark = thin)")
-        form.addRow(self.invert_checkbox)
-
-        self.inside_checkbox = QCheckBox("Inside (picture on the inside of the curve)")
-        form.addRow(self.inside_checkbox)
-
-        form_layout.addLayout(form)
-
-        frame_group = QGroupBox("Frame")
-        frame_group.setCheckable(True)
-        frame_group.setChecked(False)
-        frame_form = QFormLayout(frame_group)
-
-        self.frame_thickness_mm = QDoubleSpinBox()
-        self.frame_thickness_mm.setRange(0.5, 50.0)
-        self.frame_thickness_mm.setSingleStep(0.5)
-        self.frame_thickness_mm.setValue(3.0)
-        self.frame_thickness_mm.setSuffix(" mm")
-        frame_form.addRow("Thickness", self.frame_thickness_mm)
-
-        self.frame_depth_mm = QDoubleSpinBox()
-        self.frame_depth_mm.setRange(0.0, 50.0)
-        self.frame_depth_mm.setSingleStep(0.5)
-        self.frame_depth_mm.setValue(4.0)
-        self.frame_depth_mm.setSuffix(" mm")
-        frame_form.addRow("Depth", self.frame_depth_mm)
-
-        self.frame_angle_deg = QDoubleSpinBox()
-        self.frame_angle_deg.setRange(0.0, 80.0)
-        self.frame_angle_deg.setValue(45.0)
-        self.frame_angle_deg.setSuffix(" °")
-        frame_form.addRow("Bevel angle", self.frame_angle_deg)
-
-        self.frame_group = frame_group
-        form_layout.addWidget(frame_group)
-
-        self.hook_group = QGroupBox("Hook")
-        self.hook_group.setCheckable(True)
-        self.hook_group.setChecked(False)
-        hook_form = QFormLayout(self.hook_group)
-
-        self.hook_position_pct = QDoubleSpinBox()
-        self.hook_position_pct.setRange(-50.0, 50.0)
-        self.hook_position_pct.setValue(0.0)
-        self.hook_position_pct.setSuffix(" %")
-        self.hook_position_pct.setToolTip("0% is the top; positive goes clockwise.")
-        hook_form.addRow("Position", self.hook_position_pct)
-
-        self.hook_hole_mm = QDoubleSpinBox()
-        self.hook_hole_mm.setRange(1.0, 20.0)
-        self.hook_hole_mm.setSingleStep(0.5)
-        self.hook_hole_mm.setValue(3.5)
-        self.hook_hole_mm.setSuffix(" mm")
-        hook_form.addRow("Hole diameter", self.hook_hole_mm)
-
-        self.hook_offset_mm = QDoubleSpinBox()
-        self.hook_offset_mm.setRange(0.0, 30.0)
-        self.hook_offset_mm.setSingleStep(0.5)
-        self.hook_offset_mm.setValue(0.0)
-        self.hook_offset_mm.setSuffix(" mm")
-        hook_form.addRow("Offset", self.hook_offset_mm)
-
-        form_layout.addWidget(self.hook_group)
-
-        self.stand_group = QGroupBox("Stand (extra STL to slot the litho into)")
-        self.stand_group.setCheckable(True)
-        self.stand_group.setChecked(False)
-        self.stand_group.setToolTip(
-            "Extends the frame's bottom edge into a tab and makes a stand with a matching slot.\n"
-            "Needs the frame turned on."
-        )
-        stand_form = QFormLayout(self.stand_group)
-
-        self.stand_slot_mm = QDoubleSpinBox()
-        self.stand_slot_mm.setRange(2.0, 50.0)
-        self.stand_slot_mm.setSingleStep(0.5)
-        self.stand_slot_mm.setValue(8.0)
-        self.stand_slot_mm.setSuffix(" mm")
-        self.stand_slot_mm.setToolTip("How far the litho's tab goes down into the stand.")
-        stand_form.addRow("Slot depth", self.stand_slot_mm)
-
-        self.stand_clearance_mm = QDoubleSpinBox()
-        self.stand_clearance_mm.setRange(0.0, 2.0)
-        self.stand_clearance_mm.setSingleStep(0.05)
-        self.stand_clearance_mm.setValue(0.3)
-        self.stand_clearance_mm.setSuffix(" mm")
-        self.stand_clearance_mm.setToolTip("Gap on each side of the tab, so it slips in.")
-        stand_form.addRow("Clearance", self.stand_clearance_mm)
-
-        self.stand_wall_mm = QDoubleSpinBox()
-        self.stand_wall_mm.setRange(1.0, 20.0)
-        self.stand_wall_mm.setSingleStep(0.5)
-        self.stand_wall_mm.setValue(3.0)
-        self.stand_wall_mm.setSuffix(" mm")
-        self.stand_wall_mm.setToolTip("Thickness of the stand's floor and end walls.")
-        stand_form.addRow("Wall", self.stand_wall_mm)
-
-        self.stand_depth_mm = QDoubleSpinBox()
-        self.stand_depth_mm.setRange(5.0, 200.0)
-        self.stand_depth_mm.setValue(30.0)
-        self.stand_depth_mm.setSuffix(" mm")
-        self.stand_depth_mm.setToolTip("Front-to-back size of the stand's footprint.")
-        stand_form.addRow("Footprint depth", self.stand_depth_mm)
-
-        self.stand_chamfer_mm = QDoubleSpinBox()
-        self.stand_chamfer_mm.setRange(0.0, 20.0)
-        self.stand_chamfer_mm.setSingleStep(0.5)
-        self.stand_chamfer_mm.setValue(2.0)
-        self.stand_chamfer_mm.setSuffix(" mm")
-        self.stand_chamfer_mm.setToolTip(
-            "45° chamfer on the stand's outer top edge (0 for a square edge).\n"
-            "Must be less than the wall."
-        )
-        stand_form.addRow("Chamfer", self.stand_chamfer_mm)
-
-        form_layout.addWidget(self.stand_group)
-        self.frame_group.toggled.connect(self.stand_group.setEnabled)
-        self.stand_group.setEnabled(self.frame_group.isChecked())
-
+        footer = QVBoxLayout()
+        footer.setContentsMargins(14, 10, 14, 14)
+        footer.setSpacing(10)
+        info = QFrame()
+        info.setObjectName("info")
+        info_layout = QVBoxLayout(info)
+        info_layout.setContentsMargins(14, 10, 14, 10)
         self.size_label = QLabel()
-        form_layout.addWidget(self.size_label)
+        self.size_label.setWordWrap(True)
+        info_layout.addWidget(self.size_label)
+        footer.addWidget(info)
+        self.generate_button = QPushButton("Export STL…")
+        self.generate_button.setObjectName("primary")
+        self.generate_button.setCursor(Qt.PointingHandCursor)
+        self.generate_button.setEnabled(False)
+        self.generate_button.clicked.connect(self.generate_stl)
+        footer.addWidget(self.generate_button)
+        column.addLayout(footer)
+        return sidebar
 
+    def _photo_section(self):
+        section = Section("Photo")
+        open_button = QPushButton("Choose…")
+        open_button.setCursor(Qt.PointingHandCursor)
+        open_button.clicked.connect(self.open_image)
+        section.header.addWidget(open_button)
+        self.preview_label = ThumbnailLabel(self.open_image)
+        section.form.addRow(self.preview_label)
+        self.photo_name = QLabel()
+        self.photo_name.setObjectName("note")
+        self.photo_name.hide()
+        section.form.addRow(self.photo_name)
+        return section
+
+    def _shape_section(self):
+        section = Section("Shape")
+        self.shape_picker = SegmentedControl(SHAPES)
+        self.shape_picker.changed.connect(self._on_shape_changed)
+        section.form.addRow(self.shape_picker)
+        self.size_mm = _spin(10.0, 1000.0, 80.0, " mm", decimals=1)
+        self.size_row_label = QLabel("Width")
+        section.form.addRow(self.size_row_label, self.size_mm)
+        self.arc_angle_deg = _spin(1.0, 350.0, 60.0, " °", decimals=0)
+        self.arc_angle_row_label = QLabel("Angle")
+        section.form.addRow(self.arc_angle_row_label, self.arc_angle_deg)
+        self.inside_checkbox = QCheckBox("Picture on the inside of the curve")
+        section.form.addRow(self.inside_checkbox)
+        return section
+
+    def _thickness_section(self):
+        section = Section("Thickness")
+        self.min_thickness_mm = _spin(0.1, 10.0, 0.6, " mm", step=0.1)
+        section.form.addRow("Thinnest", self.min_thickness_mm)
+        self.max_thickness_mm = _spin(0.2, 20.0, 3.0, " mm", step=0.1)
+        section.form.addRow("Thickest", self.max_thickness_mm)
+        self.mm_per_pixel = _spin(
+            0.05, 2.0, 0.1, " mm", step=0.05,
+            tip="Size of one pixel on the print. Smaller is sharper but makes bigger files.",
+        )
+        section.form.addRow("Detail", self.mm_per_pixel)
+        self.invert_checkbox = QCheckBox("Invert (dark areas thin)")
+        section.form.addRow(self.invert_checkbox)
+        return section
+
+    def _frame_section(self):
+        self.frame_group = section = Section("Frame", checkable=True)
+        self.frame_thickness_mm = _spin(0.5, 50.0, 3.0, " mm", step=0.5)
+        section.form.addRow("Thickness", self.frame_thickness_mm)
+        self.frame_depth_mm = _spin(0.0, 50.0, 4.0, " mm", step=0.5)
+        section.form.addRow("Depth", self.frame_depth_mm)
+        self.frame_angle_deg = _spin(0.0, 80.0, 45.0, " °", decimals=0)
+        section.form.addRow("Bevel angle", self.frame_angle_deg)
+        return section
+
+    def _hook_section(self):
+        self.hook_group = section = Section("Hook", checkable=True)
+        self.hook_position_pct = _spin(
+            -50.0, 50.0, 0.0, " %", decimals=0, tip="0% is the top; positive goes clockwise."
+        )
+        section.form.addRow("Position", self.hook_position_pct)
+        self.hook_hole_mm = _spin(1.0, 20.0, 3.5, " mm", step=0.5)
+        section.form.addRow("Hole diameter", self.hook_hole_mm)
+        self.hook_offset_mm = _spin(0.0, 30.0, 0.0, " mm", step=0.5)
+        section.form.addRow("Offset", self.hook_offset_mm)
+        return section
+
+    def _stand_section(self):
+        self.stand_group = section = Section("Stand", checkable=True)
+        section.setToolTip(
+            "Extends the frame's bottom edge into a tab and saves a second STL:\n"
+            "a stand with a matching slot."
+        )
+        self.stand_slot_mm = _spin(
+            2.0, 50.0, 8.0, " mm", step=0.5, tip="How far the litho's tab goes into the stand."
+        )
+        section.form.addRow("Slot depth", self.stand_slot_mm)
+        self.stand_clearance_mm = _spin(
+            0.0, 2.0, 0.3, " mm", step=0.05, tip="Gap on each side of the tab, so it slips in."
+        )
+        section.form.addRow("Clearance", self.stand_clearance_mm)
+        self.stand_wall_mm = _spin(
+            1.0, 20.0, 3.0, " mm", step=0.5, tip="Thickness of the stand's floor and end walls."
+        )
+        section.form.addRow("Wall", self.stand_wall_mm)
+        self.stand_depth_mm = _spin(
+            5.0, 200.0, 30.0, " mm", decimals=1, tip="Front-to-back size of the stand's footprint."
+        )
+        section.form.addRow("Footprint depth", self.stand_depth_mm)
+        self.stand_chamfer_mm = _spin(
+            0.0, 20.0, 2.0, " mm", step=0.5,
+            tip="45° chamfer on the stand's outer top edge (0 for a square edge).\n"
+                "Must be less than the wall.",
+        )
+        section.form.addRow("Chamfer", self.stand_chamfer_mm)
+        return section
+
+    def _build_viewport(self):
+        viewport = QWidget()
+        column = QVBoxLayout(viewport)
+        column.setContentsMargins(0, 0, 0, 0)
+        column.setSpacing(0)
+
+        bar = QFrame()
+        bar.setObjectName("viewbar")
+        row = QHBoxLayout(bar)
+        row.setContentsMargins(16, 8, 12, 8)
+        row.setSpacing(10)
+        title = QLabel("Preview")
+        title.setObjectName("viewTitle")
+        row.addWidget(title)
+        hint = QLabel("Drag to rotate · scroll to zoom · shown at reduced detail")
+        hint.setObjectName("hint")
+        row.addWidget(hint)
+        row.addStretch()
+        self.view_mode = SegmentedControl([("Model", "model"), ("Backlit", "backlit")])
+        self.view_mode.setToolTip("Backlit shows roughly how it looks with a light behind it.")
+        row.addWidget(self.view_mode)
+        reset = QPushButton("Reset view")
+        reset.setCursor(Qt.PointingHandCursor)
+        row.addWidget(reset)
+        column.addWidget(bar)
+
+        self.model_preview = ModelPreviewWidget()
+        placeholder = QLabel(
+            f"<div style='font-size:15pt; color:{theme.TEXT}'>No photo yet</div>"
+            f"<div style='color:{theme.DIM}; margin-top:6px'>"
+            "Choose a photo, or drop one anywhere on the window,<br>"
+            "to see your lithophane here.</div>"
+        )
+        placeholder.setAlignment(Qt.AlignCenter)
+        placeholder.setStyleSheet(f"background: {theme.VIEWPORT};")
+        self.viewport_stack = QStackedWidget()
+        self.viewport_stack.addWidget(placeholder)
+        self.viewport_stack.addWidget(self.model_preview)
+        column.addWidget(self.viewport_stack, stretch=1)
+        self.view_mode.changed.connect(
+            lambda mode: self.model_preview.set_backlit(mode == "backlit")
+        )
+        reset.clicked.connect(self.model_preview.reset_camera)
+        return viewport
+
+    def _connect_updates(self):
         for spin in (
             self.size_mm, self.arc_angle_deg, self.mm_per_pixel,
             self.max_thickness_mm, self.frame_thickness_mm, self.frame_depth_mm,
@@ -392,6 +463,8 @@ class MainWindow(QMainWindow):
         ):
             spin.valueChanged.connect(self._update_estimate)
         self.frame_group.toggled.connect(self._update_estimate)
+        self.frame_group.toggled.connect(self._update_stand_availability)
+        self._update_stand_availability()
 
         # Rebuild the 3D preview shortly after the last change, not on every keystroke.
         self._reset_view = True
@@ -414,16 +487,18 @@ class MainWindow(QMainWindow):
         ):
             toggle.toggled.connect(self._schedule_model_preview)
 
-        self.generate_button = QPushButton("Generate STL…")
-        self.generate_button.setEnabled(False)
-        self.generate_button.clicked.connect(self.generate_stl)
-        form_layout.addWidget(self.generate_button)
-        form_layout.addStretch()
+    # ----- behaviour -----
 
-        layout.addLayout(form_layout)
+    def _shape(self):
+        return self.shape_picker.current()
 
-        self.setStatusBar(QStatusBar())
-        self._on_shape_changed(self.shape_combo.currentText())
+    def set_shape(self, shape):
+        self.shape_picker.set_current(shape)
+
+    def _update_stand_availability(self):
+        self.stand_group.set_available(
+            self.frame_group.isChecked(), "Turn on the frame to add a stand."
+        )
 
     def _on_shape_changed(self, shape: str):
         is_arc = shape == "Curved arc"
@@ -438,9 +513,21 @@ class MainWindow(QMainWindow):
         self._reset_view = True
         self._schedule_model_preview()
 
+    def _set_info(self, rows):
+        """rows is a list of (label, value) pairs, or a single message string."""
+        if isinstance(rows, str):
+            self.size_label.setText(rows)
+            return
+        cells = "".join(
+            f"<tr><td style='color:{theme.DIM}; padding-right:14px'>{label}</td>"
+            f"<td>{value}</td></tr>"
+            for label, value in rows
+        )
+        self.size_label.setText(f"<table cellspacing='0' cellpadding='2'>{cells}</table>")
+
     def _update_estimate(self):
         if not self.image_size:
-            self.size_label.setText("Open an image to see the size.")
+            self._set_info("Choose a photo to get started.")
             return
         mm = self.mm_per_pixel.value()
         extent = frame_extent_mm(
@@ -448,49 +535,48 @@ class MainWindow(QMainWindow):
             self.frame_thickness_mm.value(), self.frame_depth_mm.value(),
             self.frame_angle_deg.value(),
         )
-        if self.shape_combo.currentText() == "Circle":
+        if self._shape() == "Circle":
             picture = circle_picture_diameter_mm(self.size_mm.value(), extent)
             if picture < 4 * mm:
-                self.size_label.setText("Diameter is too small to fit the frame.")
+                self._set_info("Diameter is too small to fit the frame.")
                 return
             triangles = 1.6 * (picture / mm) ** 2
-            self.size_label.setText(
-                f"Picture diameter: {picture:.1f} mm (photo is centre-cropped)\n"
-                f"Estimated file size: {triangles * 50 / 1e6:.0f} MB"
-            )
+            self._set_info([
+                ("Picture", f"{picture:.1f} mm across (centre-cropped)"),
+                ("File size", f"about {triangles * 50 / 1e6:.0f} MB"),
+            ])
             return
         try:
-            if self.shape_combo.currentText() == "Curved arc":
+            if self._shape() == "Curved arc":
                 rows, cols, width = panel_dimensions_from_height(
                     self.image_size, self.size_mm.value(), mm, extent
                 )
                 radius = arc_radius_mm(width, self.arc_angle_deg.value())
-                dims = (
-                    f"Width (around the curve): {width:.1f} mm\n"
-                    f"Radius (flat side): {radius:.1f} mm"
-                )
+                dims = [
+                    ("Width", f"{width:.1f} mm around the curve"),
+                    ("Radius", f"{radius:.1f} mm (flat side)"),
+                ]
             else:
                 rows, cols, height = panel_dimensions(
                     self.image_size, self.size_mm.value(), mm, extent
                 )
-                dims = f"Height: {height:.1f} mm"
+                dims = [("Height", f"{height:.1f} mm")]
         except ValueError as exc:
-            self.size_label.setText(str(exc))
+            self._set_info(str(exc))
             return
         triangles = 2 * rows * cols + 12 * (rows + cols)
-        megabytes = triangles * 50 / 1e6
-        self.size_label.setText(f"{dims}\nEstimated file size: {megabytes:.0f} MB")
+        self._set_info(dims + [("File size", f"about {triangles * 50 / 1e6:.0f} MB")])
 
     def _stand_wanted(self):
         return (
-            self.shape_combo.currentText() != "Circle"
+            self._shape() != "Circle"
             and self.frame_group.isChecked()
             and self.stand_group.isChecked()
         )
 
     def _build_stand(self, vertices, output_path):
         """Stand the litho up and make its stand; returns both in the assembled position."""
-        curved = self.shape_combo.currentText() == "Curved arc"
+        curved = self._shape() == "Curved arc"
         standing = standing_lithophane(vertices, curved)
         stand = generate_stand(
             standing, curved, output_path,
@@ -513,7 +599,7 @@ class MainWindow(QMainWindow):
             frame_depth_mm=self.frame_depth_mm.value(),
             frame_angle_deg=self.frame_angle_deg.value(),
         )
-        shape = self.shape_combo.currentText()
+        shape = self._shape()
         if shape != "Circle":
             common["stand_tab_mm"] = self.stand_slot_mm.value() if self._stand_wanted() else 0.0
         if shape == "Curved arc":
@@ -558,7 +644,7 @@ class MainWindow(QMainWindow):
             self.model_preview.clear_mesh()
             self.statusBar().showMessage(str(exc))
             return
-        shape = self.shape_combo.currentText()
+        shape = self._shape()
         if shape == "Curved arc":
             # The flat side is the innermost radius, or the outermost when the picture is inside.
             r = np.hypot(vertices[:, 0], vertices[:, 1])
@@ -587,25 +673,46 @@ class MainWindow(QMainWindow):
             self,
             "Open Image",
             "",
-            "Images (*.png *.jpg *.jpeg *.bmp *.tiff *.webp)",
+            "Images (*.png *.jpg *.jpeg *.bmp *.tif *.tiff *.webp)",
         )
-        if not path:
+        if path:
+            self.load_image(path)
+
+    def load_image(self, path):
+        original = QPixmap(path)
+        if original.isNull():
+            QMessageBox.warning(self, "Can't open photo", f"Couldn't read {path} as an image.")
             return
         self.image_path = path
-        original = QPixmap(path)
         self.image_size = (original.width(), original.height())
+        self.viewport_stack.setCurrentWidget(self.model_preview)
         self._update_estimate()
         self._reset_view = True
         self._update_model_preview()
-        pixmap = original.scaled(
-            self.preview_label.width(),
-            self.preview_label.height(),
-            Qt.KeepAspectRatio,
-            Qt.SmoothTransformation,
-        )
-        self.preview_label.setPixmap(pixmap)
+        self.preview_label.setPixmap(original.scaled(
+            self.preview_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation
+        ))
+        self.preview_label.setProperty("loaded", True)
+        self.preview_label.style().polish(self.preview_label)
+        self.photo_name.setText(f"{Path(path).name}  ·  {original.width()} × {original.height()} px")
+        self.photo_name.show()
         self.generate_button.setEnabled(True)
         self.statusBar().showMessage(f"Loaded {path}")
+
+    def _dropped_image(self, event):
+        for url in event.mimeData().urls():
+            if url.isLocalFile() and Path(url.toLocalFile()).suffix.lower() in IMAGE_SUFFIXES:
+                return url.toLocalFile()
+        return None
+
+    def dragEnterEvent(self, event):
+        if self._dropped_image(event):
+            event.acceptProposedAction()
+
+    def dropEvent(self, event):
+        path = self._dropped_image(event)
+        if path:
+            self.load_image(path)
 
     def generate_stl(self):
         if not self.image_path:
@@ -634,7 +741,8 @@ class MainWindow(QMainWindow):
 
 def run():
     app = QApplication.instance() or QApplication([])
+    theme.apply(app)
     window = MainWindow()
-    window.resize(1240, 680)
+    window.resize(1320, 840)
     window.show()
     app.exec()

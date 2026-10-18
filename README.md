@@ -19,3 +19,16 @@ source .venv/bin/activate        # fish: source .venv/bin/activate.fish
 pip install -e .
 lithophane
 ```
+
+## Windows exe
+
+Download `LithophaneMaker.exe` from the [Releases](../../releases) page; no Python needed.
+
+GitHub Actions builds it (`.github/workflows/build-windows.yml`): push a tag such as
+`v0.1.0` to make a release, or run the workflow by hand from the Actions tab. To build
+it yourself on Windows:
+
+```sh
+pip install . pyinstaller
+pyinstaller --onefile --windowed --name LithophaneMaker --collect-submodules OpenGL --exclude-module pyqtgraph.jupyter src/lithophane/main.py
+```

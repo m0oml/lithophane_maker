@@ -245,6 +245,10 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._build_viewport(), stretch=1)
 
         self.setStatusBar(QStatusBar())
+        # Start on the most used set-up: a 100 mm tall, 60° arc with the frame on.
+        self.set_shape("Curved arc")
+        self.size_mm.setValue(100.0)
+        self.frame_group.setChecked(True)
         self._connect_updates()
         self._on_shape_changed(self._shape())
 

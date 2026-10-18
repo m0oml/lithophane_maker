@@ -24,10 +24,12 @@ lithophane
 
 No Python needed. From the [Releases](../../releases) page download:
 
-- **Windows:** `LithophaneMaker-windows.zip`. Extract it and run `LithophaneMaker.exe` in the
-  `LithophaneMaker` folder (keep the exe with the rest of the folder). Windows may warn
-  that the app is unrecognised the first time: choose More info, then Run anyway.
-- **Linux:** `LithophaneMaker-linux.tar.gz`. Extract it and run `LithophaneMaker/LithophaneMaker`.
+- **Windows:** `LithophaneMaker.exe`. Just run it. Windows may warn that the app is
+  unrecognised the first time: choose More info, then Run anyway.
+- **Linux:** `LithophaneMaker-linux.tar.gz`. Extract it and run `LithophaneMaker`.
+
+Each start unpacks the app (about 200 MB) into the temp folder, so that drive needs some
+free space; a "Failed to extract" error usually means it's full.
 
 GitHub Actions builds both (`.github/workflows/build.yml`): push a tag such as `v0.1.0`
 to make a release, or run the workflow by hand from the Actions tab. To build one
@@ -35,5 +37,5 @@ yourself, on the system you want it for:
 
 ```sh
 pip install . pyinstaller
-pyinstaller --windowed --name LithophaneMaker --collect-submodules OpenGL --exclude-module pyqtgraph.jupyter src/lithophane/main.py
+pyinstaller --onefile --windowed --name LithophaneMaker --collect-submodules OpenGL --exclude-module pyqtgraph.jupyter src/lithophane/main.py
 ```

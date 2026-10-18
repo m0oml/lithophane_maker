@@ -14,7 +14,7 @@ jobs:
       matrix:
         include:
           - os: windows-latest
-            package: LithophaneMaker-windows.zip
+            package: LithophaneMaker.exe
           # The oldest supported Ubuntu, so the app runs on older Linux installs too.
           - os: ubuntu-22.04
             package: LithophaneMaker-linux.tar.gz
@@ -32,19 +32,14 @@ jobs:
           pip install . pyinstaller
 
       - name: Build
-        # A folder build, not --onefile: one-file apps unpack to a temp folder on every
-        # start, which fails when that disk is full or antivirus blocks it.
         # PyOpenGL picks its platform module at runtime, so bundle all of it.
         run: >
-          pyinstaller --noconfirm --windowed --name LithophaneMaker
+          pyinstaller --noconfirm --onefile --windowed --name LithophaneMaker
           --collect-submodules OpenGL --exclude-module pyqtgraph.jupyter
           src/lithophane/main.py
 
-      - name: Package (Windows)
-        if: runner.os == 'Windows'
-        run: Compress-Archive -Path dist/LithophaneMaker -DestinationPath dist/${{ matrix.package }}
-
       - name: Package (Linux)
+        # Tarred so the program keeps its executable permission.
         if: runner.os == 'Linux'
         run: tar -czf dist/${{ matrix.package }} -C dist LithophaneMaker
 
@@ -58,7 +53,7 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v6
+      - uses: actions/download-artifact@v8
         with:
           path: packages
           merge-multiple: true

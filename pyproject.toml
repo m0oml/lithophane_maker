@@ -1,0 +1,23 @@
+[project]
+name = "lithophane"
+version = "0.1.0"
+description = "Desktop app to turn a photo into a 3D-printable lithophane STL"
+requires-python = ">=3.10"
+dependencies = [
+    "PySide6",
+    "Pillow",
+    "numpy",
+    "numpy-stl",
+    "pyqtgraph",
+    "PyOpenGL",
+]
+
+[project.scripts]
+lithophane = "lithophane.main:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

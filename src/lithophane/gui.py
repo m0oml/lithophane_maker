@@ -1,3 +1,4 @@
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -744,9 +745,15 @@ class MainWindow(QMainWindow):
 
 
 def run():
-    app = QApplication.instance() or QApplication([])
+    app = QApplication.instance() or QApplication(sys.argv)
     theme.apply(app)
     window = MainWindow()
-    window.resize(1320, 840)
+    # Fit small screens (laptops) without hiding the Export button behind the taskbar.
+    available = app.primaryScreen().availableGeometry()
+    window.resize(min(1320, available.width() - 40), min(840, available.height() - 60))
     window.show()
+    # A photo given on the command line (or via "Open with") opens straight away.
+    photos = [a for a in sys.argv[1:] if Path(a).suffix.lower() in IMAGE_SUFFIXES]
+    if photos and Path(photos[0]).is_file():
+        window.load_image(photos[0])
     app.exec()
